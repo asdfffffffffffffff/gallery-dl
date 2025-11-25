@@ -114,92 +114,84 @@ class PixivExtractor(Extractor):
         del work["image_urls"]
         del work["meta_pages"]
 
-        # Helper: get master1200 fallback from a URL or image dict
+        # Handle ugoira exactly as before
+        if work["type"] == "ugoira":
+            url = meta_single_page["original_image_url"]
+            if url.startswith(self.limit_url):
+                # Ugoira with limit_ URL → try AJAX
+                work_id = work["id"]
+                self.log.debug("%s: %s", work_id, url)
+                limit_type = url.rpartition("/")[2]
+                if limit_type in (
+                    "limit_", "limit_unviewable_360.png", "limit_sanity_level_360.png"
+                ):
+                    work["_ajax"] = True
+                    self.log.warning("%s: 'limit_sanity_level' warning", work_id)
+                    if self.sanity_workaround:
+                        body = self._request_ajax("/illust/" + str(work_id))
+                        if not self.load_ugoira:
+                            return ()
+                        self.log.info("%s: Retrieving Ugoira AJAX metadata", work_id)
+                        try:
+                            self._extract_ajax(work, body)
+                            return self._extract_ugoira(work, url)
+                        except Exception as exc:
+                            self.log.traceback(exc)
+                            self.log.warning(
+                                "%s: Unable to extract Ugoira URL. Provide "
+                                "logged-in cookies to access it", work_id)
+                # fall through to normal ugoira handling if workaround fails/off
+            # Standard ugoira path
+            if self.load_ugoira:
+                try:
+                    return self._extract_ugoira(work, url)
+                except Exception as exc:
+                    self.log.warning(
+                        "%s: Unable to retrieve Ugoira metadata (%s - %s)",
+                        work["id"], exc.__class__.__name__, exc)
+            return ()
+
+        # === Non-ugoira: ONLY master1200 fallbacks ===
         def get_master_url(item):
             return next(iter(self._fallback_image(item)))
 
-        files = []
-
         if meta_pages:
-            # Multi-page: one master1200 per page
-            for num, img in enumerate(meta_pages):
-                files.append({
+            # Multi-page illustration
+            return [
+                {
                     "url": get_master_url(img),
                     "suffix": f"_p{num:02}",
-                })
+                }
+                for num, img in enumerate(meta_pages)
+            ]
         else:
-            # Single-page
+            # Single-page illustration
             url = meta_single_page["original_image_url"]
             if url.startswith(self.limit_url):
                 work_id = work["id"]
                 self.log.debug("%s: %s", work_id, url)
                 limit_type = url.rpartition("/")[2]
                 if limit_type in (
-                    "limit_",
-                    "limit_unviewable_360.png",
-                    "limit_sanity_level_360.png",
+                    "limit_", "limit_unviewable_360.png", "limit_sanity_level_360.png"
                 ):
                     work["_ajax"] = True
                     self.log.warning("%s: 'limit_sanity_level' warning", work_id)
                     if self.sanity_workaround:
                         body = self._request_ajax("/illust/" + str(work_id))
-                        if work["type"] == "ugoira":
-                            if not self.load_ugoira:
-                                return ()
-                            self.log.info("%s: Retrieving Ugoira AJAX metadata", work_id)
-                            try:
-                                self._extract_ajax(work, body)
-                                # Ugoira: skip (no master1200 equivalent)
-                                return ()
-                            except Exception as exc:
-                                self.log.traceback(exc)
-                                self.log.warning(
-                                    "%s: Unable to extract Ugoira URL. Provide "
-                                    "logged-in cookies to access it", work_id)
-                                return ()
-                        else:
-                            # Extract real URLs via AJAX, then take master1200 of each
-                            ajax_files = self._extract_ajax(work, body)
-                            for f in ajax_files:
-                                files.append({
-                                    "url": get_master_url(f["url"]),
-                                    "suffix": f.get("suffix", ""),
-                                })
-                            return files
-                    else:
-                        # No workaround: generate master1200 from dummy limit URL
-                        files.append({
-                            "url": get_master_url(url),
-                            "suffix": "",
-                        })
-                        return files
-
-                elif limit_type == "limit_mypixiv_360.png":
-                    work["_mypixiv"] = True
-                    self.log.warning("%s: 'My pixiv' locked", work_id)
-                else:
-                    work["_mypixiv"] = True
-                    self.log.error("%s: Unknown 'limit' URL type: %s", work_id, limit_type)
-
-                # Fallback for any limit_ case
-                files.append({
-                    "url": get_master_url(url),
-                    "suffix": "",
-                })
-                return files
-
-            elif work["type"] == "ugoira":
-                # Skip ugoira — no master1200
-                return ()
+                        ajax_files = self._extract_ajax(work, body)
+                        return [
+                            {
+                                "url": get_master_url(f["url"]),
+                                "suffix": f.get("suffix", ""),
+                            }
+                            for f in ajax_files
+                        ]
+                # For any limit_ case (including mypixiv or unknown), fallback to master1200 of dummy URL
+                return [{"url": get_master_url(url), "suffix": ""}]
 
             else:
-                # Normal single image: only master1200
-                files.append({
-                    "url": get_master_url(url),
-                    "suffix": "",
-                })
-
-        return files
+                # Normal single image
+                return [{"url": get_master_url(url), "suffix": ""}]
 
     def _extract_ugoira(self, work, img_url):
         if work.get("_ajax"):
