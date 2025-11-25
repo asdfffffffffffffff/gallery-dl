@@ -114,68 +114,103 @@ class PixivExtractor(Extractor):
         del work["image_urls"]
         del work["meta_pages"]
 
+        fallback_files = []
+
         if meta_pages:
-            return [
-                {
-                    "url"   : img["image_urls"]["original"],
-                    "suffix": f"_p{num:02}",
-                    "_fallback": self._fallback_image(img),
-                }
-                for num, img in enumerate(meta_pages)
-            ]
-
-        url = meta_single_page["original_image_url"]
-        if url.startswith(self.limit_url):
-            work_id = work["id"]
-            self.log.debug("%s: %s", work_id, url)
-
-            limit_type = url.rpartition("/")[2]
-            if limit_type in (
-                "limit_",  # for '_extend_sanity()' inserts
-                "limit_unviewable_360.png",
-                "limit_sanity_level_360.png",
-            ):
-                work["_ajax"] = True
-                self.log.warning("%s: 'limit_sanity_level' warning", work_id)
-                if self.sanity_workaround:
-                    body = self._request_ajax("/illust/" + str(work_id))
-                    if work["type"] == "ugoira":
-                        if not self.load_ugoira:
-                            return ()
-                        self.log.info("%s: Retrieving Ugoira AJAX metadata",
-                                      work["id"])
-                        try:
-                            self._extract_ajax(work, body)
-                            return self._extract_ugoira(work, url)
-                        except Exception as exc:
-                            self.log.traceback(exc)
-                            self.log.warning(
-                                "%s: Unable to extract Ugoira URL. Provide "
-                                "logged-in cookies to access it", work["id"])
+            # Multi-page work: generate fallbacks for each page
+            for num, img in enumerate(meta_pages):
+                fallback_urls = list(self._fallback_image(img))
+                for i, url in enumerate(fallback_urls):
+                    fallback_files.append({
+                        "url": url,
+                        "suffix": f"_p{num:02}_fb{i}",
+                    })
+        else:
+            # Single-page work
+            url = meta_single_page["original_image_url"]
+            if url.startswith(self.limit_url):
+                work_id = work["id"]
+                self.log.debug("%s: %s", work_id, url)
+                limit_type = url.rpartition("/")[2]
+                if limit_type in (
+                    "limit_",
+                    "limit_unviewable_360.png",
+                    "limit_sanity_level_360.png",
+                ):
+                    work["_ajax"] = True
+                    self.log.warning("%s: 'limit_sanity_level' warning", work_id)
+                    if self.sanity_workaround:
+                        body = self._request_ajax("/illust/" + str(work_id))
+                        if work["type"] == "ugoira":
+                            if not self.load_ugoira:
+                                return ()
+                            self.log.info("%s: Retrieving Ugoira AJAX metadata", work["id"])
+                            try:
+                                self._extract_ajax(work, body)
+                                # Even for ugoira, skip original ZIP and only use fallbacks if possible
+                                # But ugoira doesn't have fallbacks in same way — skip unless you want ZIP fallbacks
+                                # For now, return nothing for ugoira if only fallbacks are desired
+                                return ()
+                            except Exception as exc:
+                                self.log.traceback(exc)
+                                self.log.warning(
+                                    "%s: Unable to extract Ugoira URL. Provide "
+                                    "logged-in cookies to access it", work_id)
+                                return ()
+                        else:
+                            # Use AJAX to get real URLs, then generate fallbacks from them
+                            ajax_files = self._extract_ajax(work, body)
+                            for f in ajax_files:
+                                ajax_fallbacks = list(self._fallback_image(f["url"]))
+                                for i, fb_url in enumerate(ajax_fallbacks):
+                                    fallback_files.append({
+                                        "url": fb_url,
+                                        "suffix": f"{f.get('suffix', '')}_fb{i}",
+                                    })
+                            return fallback_files
                     else:
-                        return self._extract_ajax(work, body)
+                        # No workaround: generate fallback from limit URL (not real, but consistent)
+                        fallback_urls = list(self._fallback_image(url))
+                        for i, fb_url in enumerate(fallback_urls):
+                            fallback_files.append({
+                                "url": fb_url,
+                                "suffix": f"_p00_fb{i}",
+                            })
+                        return fallback_files
 
-            elif limit_type == "limit_mypixiv_360.png":
-                work["_mypixiv"] = True
-                self.log.warning("%s: 'My pixiv' locked", work_id)
+                elif limit_type == "limit_mypixiv_360.png":
+                    work["_mypixiv"] = True
+                    self.log.warning("%s: 'My pixiv' locked", work_id)
+
+                else:
+                    work["_mypixiv"] = True
+                    self.log.error("%s: Unknown 'limit' URL type: %s", work_id, limit_type)
+
+                # In all limit cases, generate fallback from the dummy URL
+                fallback_urls = list(self._fallback_image(url))
+                for i, fb_url in enumerate(fallback_urls):
+                    fallback_files.append({
+                        "url": fb_url,
+                        "suffix": f"_p00_fb{i}",
+                    })
+                return fallback_files
+
+            elif work["type"] == "ugoira":
+                # Skip ugoira originals entirely (no fallback logic defined for frames)
+                if self.load_ugoira:
+                    self.log.debug("%s: Skipping ugoira (no fallback support)", work["id"])
+                return ()
 
             else:
-                work["_mypixiv"] = True  # stop further processing
-                self.log.error("%s: Unknown 'limit' URL type: %s",
-                               work_id, limit_type)
+                # Normal single image: only fallbacks
+                fallback_urls = list(self._fallback_image(url))
+                for i, fb_url in enumerate(fallback_urls):
+                    fallback_files.append({
+                        "url": fb_url,
+                        "suffix": f"_p00_fb{i}",
+                    })
 
-        elif work["type"] != "ugoira":
-            return ({"url": url, "_fallback": self._fallback_image(url)},)
-
-        elif self.load_ugoira:
-            try:
-                return self._extract_ugoira(work, url)
-            except Exception as exc:
-                self.log.warning(
-                    "%s: Unable to retrieve Ugoira metatdata (%s - %s)",
-                    work["id"], exc.__class__.__name__, exc)
-
-        return ()
+        return fallback_files
 
     def _extract_ugoira(self, work, img_url):
         if work.get("_ajax"):
