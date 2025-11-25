@@ -114,19 +114,21 @@ class PixivExtractor(Extractor):
         del work["image_urls"]
         del work["meta_pages"]
 
-        fallback_files = []
+        # Helper: get master1200 fallback from a URL or image dict
+        def get_master_url(item):
+            return next(iter(self._fallback_image(item)))
+
+        files = []
 
         if meta_pages:
-            # Multi-page work: generate fallbacks for each page
+            # Multi-page: one master1200 per page
             for num, img in enumerate(meta_pages):
-                fallback_urls = list(self._fallback_image(img))
-                for i, url in enumerate(fallback_urls):
-                    fallback_files.append({
-                        "url": url,
-                        "suffix": f"_p{num:02}_fb{i}",
-                    })
+                files.append({
+                    "url": get_master_url(img),
+                    "suffix": f"_p{num:02}",
+                })
         else:
-            # Single-page work
+            # Single-page
             url = meta_single_page["original_image_url"]
             if url.startswith(self.limit_url):
                 work_id = work["id"]
@@ -144,12 +146,10 @@ class PixivExtractor(Extractor):
                         if work["type"] == "ugoira":
                             if not self.load_ugoira:
                                 return ()
-                            self.log.info("%s: Retrieving Ugoira AJAX metadata", work["id"])
+                            self.log.info("%s: Retrieving Ugoira AJAX metadata", work_id)
                             try:
                                 self._extract_ajax(work, body)
-                                # Even for ugoira, skip original ZIP and only use fallbacks if possible
-                                # But ugoira doesn't have fallbacks in same way — skip unless you want ZIP fallbacks
-                                # For now, return nothing for ugoira if only fallbacks are desired
+                                # Ugoira: skip (no master1200 equivalent)
                                 return ()
                             except Exception as exc:
                                 self.log.traceback(exc)
@@ -158,59 +158,48 @@ class PixivExtractor(Extractor):
                                     "logged-in cookies to access it", work_id)
                                 return ()
                         else:
-                            # Use AJAX to get real URLs, then generate fallbacks from them
+                            # Extract real URLs via AJAX, then take master1200 of each
                             ajax_files = self._extract_ajax(work, body)
                             for f in ajax_files:
-                                ajax_fallbacks = list(self._fallback_image(f["url"]))
-                                for i, fb_url in enumerate(ajax_fallbacks):
-                                    fallback_files.append({
-                                        "url": fb_url,
-                                        "suffix": f"{f.get('suffix', '')}_fb{i}",
-                                    })
-                            return fallback_files
+                                files.append({
+                                    "url": get_master_url(f["url"]),
+                                    "suffix": f.get("suffix", ""),
+                                })
+                            return files
                     else:
-                        # No workaround: generate fallback from limit URL (not real, but consistent)
-                        fallback_urls = list(self._fallback_image(url))
-                        for i, fb_url in enumerate(fallback_urls):
-                            fallback_files.append({
-                                "url": fb_url,
-                                "suffix": f"_p00_fb{i}",
-                            })
-                        return fallback_files
+                        # No workaround: generate master1200 from dummy limit URL
+                        files.append({
+                            "url": get_master_url(url),
+                            "suffix": "",
+                        })
+                        return files
 
                 elif limit_type == "limit_mypixiv_360.png":
                     work["_mypixiv"] = True
                     self.log.warning("%s: 'My pixiv' locked", work_id)
-
                 else:
                     work["_mypixiv"] = True
                     self.log.error("%s: Unknown 'limit' URL type: %s", work_id, limit_type)
 
-                # In all limit cases, generate fallback from the dummy URL
-                fallback_urls = list(self._fallback_image(url))
-                for i, fb_url in enumerate(fallback_urls):
-                    fallback_files.append({
-                        "url": fb_url,
-                        "suffix": f"_p00_fb{i}",
-                    })
-                return fallback_files
+                # Fallback for any limit_ case
+                files.append({
+                    "url": get_master_url(url),
+                    "suffix": "",
+                })
+                return files
 
             elif work["type"] == "ugoira":
-                # Skip ugoira originals entirely (no fallback logic defined for frames)
-                if self.load_ugoira:
-                    self.log.debug("%s: Skipping ugoira (no fallback support)", work["id"])
+                # Skip ugoira — no master1200
                 return ()
 
             else:
-                # Normal single image: only fallbacks
-                fallback_urls = list(self._fallback_image(url))
-                for i, fb_url in enumerate(fallback_urls):
-                    fallback_files.append({
-                        "url": fb_url,
-                        "suffix": f"_p00_fb{i}",
-                    })
+                # Normal single image: only master1200
+                files.append({
+                    "url": get_master_url(url),
+                    "suffix": "",
+                })
 
-        return fallback_files
+        return files
 
     def _extract_ugoira(self, work, img_url):
         if work.get("_ajax"):
@@ -371,21 +360,11 @@ class PixivExtractor(Extractor):
 
     def _fallback_image(self, src):
         if isinstance(src, str):
-            urls = None
             orig = src
         else:
-            urls = src["image_urls"]
-            orig = urls["original"]
-
+            orig = src["image_urls"]["original"]
         base = orig.rpartition(".")[0]
         yield base.replace("-original/", "-master/", 1) + "_master1200.jpg"
-
-        if urls is None:
-            return
-
-        for fmt in ("large", "medium", "square_medium"):
-            if fmt in urls:
-                yield urls[fmt]
 
     def _date_from_url(self, url, offset=dt.timedelta(hours=9)):
         try:
